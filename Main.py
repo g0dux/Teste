@@ -1,192 +1,229 @@
-#!/usr/bin/env python3
-# chatcyber_sherlock.py
+import sys
+# Patch para contornar a ausência do módulo 'distutils'
+try:
+    import distutils
+except ImportError:
+    try:
+        import setuptools._distutils as distutils
+        sys.modules['distutils'] = distutils
+    except ImportError:
+        pass
 
 import os
-import sys
-import shutil
-import stat
-import zipfile
-import platform
-import subprocess
-import tempfile
+import time
+import re
+import logging
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from rich.console import Console
-from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.panel import Panel
-from rich.align import Align
-from rich import box
-from pyfiglet import Figlet
-from stem.process import launch_tor_with_config
+import io
+import psutil
+import threading
+import concurrent.futures
+import importlib.util
+import numpy as np
+from flask import Flask, request, jsonify, render_template, Response
+from nltk.sentiment import SentimentIntensityAnalyzer
+from langdetect import detect
+from llama_cpp import Llama
+from huggingface_hub import hf_hub_download
+from duckduckgo_search import DDGS
+from PIL import Image, ExifTags
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+import nltk
+import socket
+import gradio as gr
 
-console = Console()
-TIMEOUT = 7
-TOR_PORT = 9050
-TOR_CONTROL_PORT = 9051
+# opcional: import pyshark se instalado
+try:
+    import pyshark
+except ImportError:
+    pyshark = None
+    logging.warning("pyshark não está instalado. Análise de rede indisponível.")
 
-# --- TODAS AS FERRAMENTAS SOLICITADAS ---
-SITES = {
-    "e-SUS Território":         "https://www.e-sus-territorio.gov.br/usuarios/{}",
-    "Wiggle.net":               "https://wiggle.net/{}",
-    "FotoForensics":            "https://fotoforensics.com/analysis.php?image={}",
-    "PeekYou":                  "https://www.peekyou.com/{}",
-    "TruePeopleSearch":         "https://www.truepeoplesearch.com/results?name={}",
-    "That'sThem":               "https://thatsthem.com/name/{}",
-    "Webmii":                   "https://webmii.com/{}",
-    "SocialSearch":             "https://www.social-searcher.com/social/{}",
-    "Lullar":                   "https://www.lullar.com/#!/search/{}",
-    "Hunter.io":                "https://hunter.io/search/{}",
-    "HaveIBeenPwned":           "https://haveibeenpwned.com/unifiedsearch/{}",
-    "DomainTools Whois":        "https://whois.domaintools.com/{}",
-    "ViewDNS.info":             "https://viewdns.info/reversewhois/?q={}",
-    "DNSDumpster":              "https://dnsdumpster.com/static/map.html?domain={}",
-    "crt.sh":                   "https://crt.sh/?q={}",
-    "Shodan":                   "https://www.shodan.io/host/{}",
-    "Censys":                   "https://censys.io/ipv4/{}",
-    "VirusTotal":               "https://www.virustotal.com/gui/ip-address/{}/detection",
-    "Talos Intelligence":       "https://talosintelligence.com/reputation_center/lookup?search={}",
-    "Namecheckr":               "https://namechk.com/{}",
-    "WhatsMyName":              "https://whatsmyname.app/{}",
-    "Instagram (Picuki)":       "https://api.picuki.com/v1/profile/{}",
-    "Twitter Advanced Search":  "https://twitter.com/search?q={}&f=live",
-    "Facebook Graph Search":    "https://www.facebook.com/public/{}",
-    "RedditSearch.io":          "https://redditsearch.io/?q={}",
-    "LinkedIn Lookup":          "https://www.linkedin.com/in/{}",
-    "Snap Map":                 "https://www.snapmap.io/{}",
-    "TikTok Search":            "https://www.tiktok.com/@{}",
-    "IPinfo.io":                "https://ipinfo.io/{}",
-    "IPlocation.net":           "https://www.iplocation.net/ip-lookup/{}",
-    "AbuseIPDB":                "https://www.abuseipdb.com/check/{}",
-    "GeoIPTool":                "https://geoiptool.com/en/?ip={}",
-    "BGPlay (RIPE NCC)":        "https://stat.ripe.net/data/bg-play/data.json?resource={}",
-    "DeHashed":                 "https://dehashed.com/search?query={}",
-    "IntelligenceX":            "https://intelx.io/?order=d&q={}",
-    "LeakCheck":                "https://leakcheck.net/search?q={}",
-    "Ahmia":                    "https://ahmia.fi/search/?q={}",
-    "Onion.live":               "https://onion.live/search?q={}",
-    "Exploit-DB (Google Dorks)": "https://www.exploit-db.com/google-hacking-database?q={}",
-    "Metadata2Go":              "https://www.metadata2go.com/api/analyze?url={}",
-    "FOIA.gov":                 "https://www.foia.gov/search/site/{}",
-    "Wayback Machine":          "https://web.archive.org/web/*/{}",
-    "PDF Examiner":             "https://www.pdfexaminer.com/?file={}",
-    "Google Reverse Image":     "https://www.google.com/searchbyimage?image_url={}",
-    "Yandex Images":            "https://yandex.com/images/search?url={}",
-    "TinEye":                   "https://tineye.com/search?url={}",
-    "Exif.tools":               "https://exif.tools/analyze?url={}",
-    "InVID Verification":       "https://verify.invid-project.eu/?url={}",
-    "TorLinks (.onion)":        "http://torlinkbgs6aabns.onion/search?query={}"
+# ==================== CONFIGURAÇÕES GERAIS ====================
+nltk.download('punkt')
+nltk.download('vader_lexicon')
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+sentiment_analyzer = SentimentIntensityAnalyzer()
+
+LANGUAGE_MAP = {
+    'Português': {'code': 'pt-BR', 'instruction': 'Responda em português brasileiro'},
+    'English':   {'code': 'en-US', 'instruction': 'Respond in English'},
+    'Español':   {'code': 'es-ES', 'instruction': 'Responde en español'},
+    'Français':  {'code': 'fr-FR', 'instruction': 'Réponds en français'},
+    'Deutsch':   {'code': 'de-DE', 'instruction': 'Antworte auf Deutsch'}
 }
 
-def ensure_tor():
-    """Baixa e extrai o Tor Expert Bundle se não estiver no PATH."""
-    exe = "tor.exe" if platform.system()=="Windows" else "tor"
-    path = shutil.which(exe)
-    if path:
-        return path
+DEFAULT_MODEL_NAME      = "TheBloke/Mistral-7B-Instruct-v0.1-GGUF"
+DEFAULT_MODEL_FILE      = "mistral-7b-instruct-v0.1.Q4_K_M.gguf"
+DEFAULT_LOCAL_MODEL_DIR = "models"
 
-    console.log("[yellow]Tor não encontrado. Baixando Expert Bundle…[/]")
-    # URLs oficiais (atualize versões se necessário)
-    if platform.system()=="Windows":
-        url = "https://www.torproject.org/dist/torbrowser/12.0.6/tor-win64-0.4.9.14.zip"
-        ext = ".zip"
-    else:
-        url = "https://www.torproject.org/dist/tor/0.4.9.14/tor-0.4.9.14-linux-x86_64-en-US.tar.gz"
-        ext = ".tar.gz"
+# ==================== SITES DE INVESTIGAÇÃO ====================
+INVESTIGATION_SITES = {
+    "e-sus Território":    "https://territorio.datasus.gov.br/?q={query}",
+    "Wigle Net":           "https://wigle.net/search?query={query}",
+    "FotoForensics":       "https://fotoforensics.com/search.php?url={query}",
+    "PeekYou":             "https://www.peekyou.com/?q={query}",
+    "TruePeopleSearch":    "https://www.truepeoplesearch.com/results?name={query}",
+    "That'sThem":          "https://thatsthem.com/search?term={query}",
+    "Webmii":              "https://webmii.com/people?q={query}",
+    "SocialSearch":        "https://social-searcher.com/social-profile?keyword={query}",
+    "Lullar":              "https://lullar.com/search/{query}",
+    "Whois (DomainTools)": "https://whois.domaintools.com/{query}",
+    "ViewDNS.info":        "https://viewdns.info/reversewhois/?q={query}",
+    "DNSDumpster":         "https://dnsdumpster.com/static/map?search={query}",
+    "crt.sh":              "https://crt.sh/?q={query}",
+    "Talos Intelligence":  "https://talosintelligence.com/reputation_center/lookup?search={query}",
+    "Namecheckr":          "https://namecheckr.com/{query}",
+    "WhatsMyName":         "https://whatsmyname.app/profile/{query}",
+    "Instagram Viewer":    "https://www.picuki.com/profile/{query}",
+    "Twitter Advanced":    "https://twitter.com/search?q={query}",
+    "RedditSearch.io":     "https://redditsearch.io/?q={query}",
+    "Snap Map":            "https://snapmap.snapchat.com/search?query={query}",
+    "TikTok Search":       "https://www.tiktok.com/search?q={query}",
+    "IPlocation.net":      "https://www.iplocation.net/search?query={query}",
+    "GeoIPTool":           "https://geoiptool.com/?ip={query}",
+    "BGPlay (RIPE NCC)":   "https://bgplay.nic.ad.jp/cgi-bin/bgplay?prefix={query}",
+    "LeakCheck":           "https://leakcheck.net/search?query={query}",
+    "Ahmia":               "https://ahmia.fi/search/?q={query}",
+    "Onion.live":          "https://onion.live/{query}",
+    "Google Dorks":        "https://www.google.com/search?q={query}",
+    "Metadata2Go":         "https://www.metadata2go.com/?url={query}",
+    "FOIA.gov":            "https://www.foia.gov/search?query={query}",
+    "Internet Archive":    "https://archive.org/search.php?query={query}",
+    "PDF Examiner":        "https://www.pdfexaminer.com/examine?url={query}",
+    "Google Reverse Image":"https://images.google.com/searchbyimage?image_url={query}",
+    "Yandex Images":       "https://yandex.com/images/search?rpt=imageview&url={query}",
+    "TinEye":              "https://tineye.com/search?url={query}",
+    "Exif.tools":          "https://exif.tools/?url={query}",
+    "InVID Verification":  "https://www.invid-project.eu/tools-and-services/invid-verification-plugin/?url={query}",
+    "TorLinks":            "https://torlinkbgs6aabns.onion.link/search?q={query}"
+}
 
-    dl = os.path.join(tempfile.gettempdir(), "tor"+ext)
-    r = requests.get(url, stream=True)
-    total = int(r.headers.get("content-length",0))
-    with open(dl, "wb") as f, Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}")) as prog:
-        task = prog.add_task("Baixando Tor...", total=total)
-        for chunk in r.iter_content(1024*64):
-            f.write(chunk); prog.advance(task, len(chunk))
+def build_site_links(query: str) -> str:
+    html  = "<h3>Sites Específicos</h3>"
+    html += "<table border='1' style='width:100%; border-collapse: collapse; text-align: left;'>"
+    html += "<thead><tr><th>Site</th><th>Link</th></tr></thead><tbody>"
+    for name, tpl in INVESTIGATION_SITES.items():
+        url = tpl.format(query=query)
+        html += f"<tr><td>{name}</td><td><a href='{url}' target='_blank'>{url}</a></td></tr>"
+    html += "</tbody></table><br>"
+    return html
 
-    console.log("[green]Download concluído. Extraindo…[/]")
-    extract_dir = os.path.join(tempfile.gettempdir(), "tor_expert")
-    shutil.rmtree(extract_dir, ignore_errors=True)
-    os.makedirs(extract_dir, exist_ok=True)
+# ==================== FLASK APP ====================
+app = Flask(__name__)
 
-    if ext==".zip":
-        with zipfile.ZipFile(dl,'r') as z: z.extractall(extract_dir)
-    else:
-        import tarfile
-        with tarfile.open(dl,'r:gz') as t: t.extractall(extract_dir)
+# Métricas Prometheus
+REQUEST_COUNT   = Counter('flask_request_count', 'Total de requisições', ['endpoint', 'method'])
+REQUEST_LATENCY = Histogram('flask_request_latency_seconds', 'Tempo de resposta', ['endpoint'])
 
-    for root,_,files in os.walk(extract_dir):
-        if exe in files:
-            bin_path = os.path.join(root,exe)
-            os.chmod(bin_path, os.stat(bin_path).st_mode | stat.S_IEXEC)
-            console.log(f"[green]Tor extraído em {bin_path}[/]")
-            return bin_path
+@app.before_request
+def before_request():
+    request.start_time = time.time()
+    REQUEST_COUNT.labels(request.path, request.method).inc()
 
-    console.log("[red]Erro: não localizei o binário tor[/]")
-    sys.exit(1)
+@app.after_request
+def after_request(response):
+    REQUEST_LATENCY.labels(request.path).observe(time.time() - request.start_time)
+    return response
 
-def launch_tor():
-    """Inicia o Tor em background via Stem."""
-    tor_path = ensure_tor()
-    console.log("[cyan]Iniciando Tor na porta 9050…[/]")
-    return launch_tor_with_config(
-        config={
-            "SocksPort": str(TOR_PORT),
-            "ControlPort": str(TOR_CONTROL_PORT)
-        },
-        tor_cmd=tor_path,
-        init_msg_handler=lambda line: console.log(f"[blue]{line}[/]") if "Bootstrapped" in line else None
-    )
+@app.route('/')
+def index():
+    # agora busca em templates/index.html
+    return render_template('index.html')
 
-def get_session_for(url):
-    sess = requests.Session()
-    if ".onion" in url:
-        sess.proxies.update({
-            "http":  f"socks5h://127.0.0.1:{TOR_PORT}",
-            "https": f"socks5h://127.0.0.1:{TOR_PORT}"
-        })
-    return sess
+@app.route('/metrics')
+def metrics():
+    data = generate_latest()
+    return Response(data, mimetype=CONTENT_TYPE_LATEST)
 
-def check_site(name, pattern, target):
-    url = pattern.format(target)
-    sess = get_session_for(url)
-    try:
-        r = sess.get(url, timeout=TIMEOUT, headers={"User-Agent":"Mozilla/5.0"})
-        found = (r.status_code==200 and len(r.text)>500)
-        return name, url, found
-    except Exception:
-        return name, url, False
+@app.route('/ask', methods=['POST'])
+def ask():
+    mode = request.form.get('mode', 'Chat')
+    user_input = request.form.get('user_input', '').strip()
 
-def print_header():
-    fig = Figlet(font="slant")
-    art = fig.renderText("CHATCYBER CSI")
-    console.print(Panel.fit(art, style="bold magenta", subtitle="OSINT Sherlocked"))
+    if mode == "Investigação":
+        # 1) Autocorreção e pré-processamento (omitido aqui)
+        query = user_input
 
-def main():
-    if len(sys.argv)!=2:
-        console.print("Uso: python chatcyber_sherlock.py <alvo>", style="red")
-        sys.exit(1)
-    target = sys.argv[1]
-    print_header()
-    tor_proc = launch_tor()
-    console.print(f"[bold green]Verificando “[yellow]{target}[/]” em {len(SITES)} sites[/]\n")
+        # 2) Gera links dos sites estáticos
+        links_sites = build_site_links(query)
 
-    table = Table(box=box.SIMPLE_HEAVY)
-    table.add_column("Status", style="bold")
-    table.add_column("Site")
-    table.add_column("URL", overflow="fold")
+        # 3) Pesquisa web básica
+        sites_meta = int(request.form.get('sites_meta', 5))
+        results_web = perform_search(query, 'web', sites_meta)
+        _, links_web, _ = format_search_results(results_web, "Resultados Web")
 
-    with ThreadPoolExecutor(max_workers=20) as pool:
-        futures = { pool.submit(check_site, n, p, target): n for n,p in SITES.items() }
-        for fut in as_completed(futures):
-            name, url, ok = fut.result()
-            status = "[green]✔[/]" if ok else "[red]✖[/]"
-            table.add_row(status, name, url)
-            console.clear()
-            console.print(Panel.fit("Resultados em tempo real", style="bold blue"))
-            console.print(table)
+        # 4) Geração de relatório via modelo
+        report, _ = process_investigation(
+            target=query,
+            sites_meta=sites_meta,
+            investigation_focus=request.form.get('investigation_focus',''),
+            search_news=request.form.get('search_news','false')=='true',
+            search_leaked_data=request.form.get('search_leaked_data','false')=='true',
+            custom_temperature=None,
+            lang='Português',
+            fast_mode=False
+        )
 
-    console.print("\n[bold blue]✓ Busca concluída![/]")
-    console.log("[cyan]Parando Tor…[/]")
-    tor_proc.kill()
+        # 5) Combina tudo e retorna
+        final_links = links_sites + links_web
+        return jsonify({'response': report, 'links': final_links})
 
-if __name__=="__main__":
-    main()
+    # modos Chat e Metadados seguem seu fluxo normal…
+    return jsonify({'response': 'Modo não suportado.'})
+
+# ==================== FUNÇÕES AUXILIARES ====================
+def perform_search(query: str, search_type: str, max_results: int) -> list:
+    with DDGS() as ddgs:
+        if search_type == 'web':
+            return list(ddgs.text(keywords=query, max_results=max_results))
+        elif search_type == 'news':
+            return list(ddgs.news(keywords=query, max_results=max_results))
+        elif search_type == 'leaked':
+            return list(ddgs.text(keywords=f"{query} leaked", max_results=max_results))
+    return []
+
+def format_search_results(results: list, title: str) -> tuple[str, str, str]:
+    links_table = f"<h3>{title}</h3><table border='1' style='width:100%; border-collapse: collapse;'>"
+    links_table += "<thead><tr><th>#</th><th>Título</th><th>Link</th></tr></thead><tbody>"
+    for i, r in enumerate(results, 1):
+        href = r.get('href','')
+        title = r.get('title','')
+        links_table += f"<tr><td>{i}</td><td>{title}</td><td><a href='{href}' target='_blank'>{href}</a></td></tr>"
+    links_table += "</tbody></table>"
+    return "", links_table, ""
+
+def process_investigation(target: str, sites_meta: int, investigation_focus: str,
+                          search_news: bool, search_leaked_data: bool,
+                          custom_temperature, lang, fast_mode) -> tuple[str, str]:
+    """
+    Aqui entra todo o seu fluxo de autocorreção, buscas paralelas (web/news/leaked),
+    análise forense (regex), montagem do prompt e chamada ao modelo Llama.
+    Para simplificar, retorna um relatório dummy:
+    """
+    report = f"Relatório detalhado para '{target}' com foco em '{investigation_focus}'."
+    return report, ""
+
+# ==================== MODELO LLM ====================
+model_lock = threading.Lock()
+
+def load_model(custom_gpu_layers=None, custom_n_batch=None) -> Llama:
+    model_path = os.path.join(DEFAULT_LOCAL_MODEL_DIR, DEFAULT_MODEL_FILE)
+    if not os.path.exists(model_path):
+        hf_hub_download(repo_id=DEFAULT_MODEL_NAME, filename=DEFAULT_MODEL_FILE, local_dir=DEFAULT_LOCAL_MODEL_DIR, resume_download=True)
+    # detecção de GPU e configuração de n_gpu_layers, n_batch...
+    # (mesmo código que você já tem)
+    return Llama(model_path=model_path, n_ctx=4096, n_threads=psutil.cpu_count(), n_gpu_layers=-1, n_batch=1024)
+
+model = load_model()
+
+# ==================== GRADIO (opcional) ====================
+def gradio_interface(...):
+    # sua função de interface Gradio, sem alterações
+    ...
+
+# ==================== EXECUÇÃO ====================
+if __name__ == '__main__':
+    # iniciar Gradio em thread, se desejar...
+    app.run(host='0.0.0.0', port=5000, debug=True)
