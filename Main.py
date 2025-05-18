@@ -28,7 +28,6 @@ from llama_cpp import Llama
 from nltk.sentiment import SentimentIntensityAnalyzer
 from langdetect import detect
 from PIL import Image, ExifTags
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 import psutil
 import requests
 import numpy as np
@@ -169,7 +168,6 @@ def ask():
         final_links = links_sites + links_web
         return jsonify({'response': report, 'links': final_links})
 
-    # modos Chat e Metadados podem ser implementados aqui...
     return jsonify({'response': 'Modo não suportado.'})
 
 # ==================== FUNÇÕES AUXILIARES ====================
@@ -199,9 +197,7 @@ def format_search_results(results: list, title: str) -> tuple[str, str, str]:
 def process_investigation(target: str, sites_meta: int, investigation_focus: str,
                           search_news: bool, search_leaked_data: bool,
                           custom_temperature, lang, fast_mode) -> tuple[str, str]:
-    # Insira aqui seu fluxo completo: autocorrect_text, buscas paralelas,
-    # advanced_forensic_analysis, montagem de prompt e chamada ao modelo Llama.
-    # Para demo, retorno dummy:
+    # Insira aqui seu fluxo completo de investigação
     report = f"Relatório detalhado para '{target}' com foco em '{investigation_focus}'."
     return report, ""
 
@@ -213,10 +209,13 @@ def load_model(custom_gpu_layers=None, custom_n_batch=None) -> Llama:
     if not os.path.exists(model_path):
         hf_hub_download(repo_id=DEFAULT_MODEL_NAME, filename=DEFAULT_MODEL_FILE,
                         local_dir=DEFAULT_LOCAL_MODEL_DIR, resume_download=True)
-    # Detectar GPU e definir n_gpu_layers, n_batch conforme ambiente
-    return Llama(model_path=model_path, n_ctx=4096,
-                 n_threads=psutil.cpu_count(logical=True),
-                 n_gpu_layers=-1, n_batch=1024)
+    return Llama(
+        model_path=model_path,
+        n_ctx=4096,
+        n_threads=psutil.cpu_count(logical=True),
+        n_gpu_layers=-1,
+        n_batch=1024
+    )
 
 model = load_model()
 
@@ -224,18 +223,16 @@ model = load_model()
 def gradio_interface(query, mode, language, style, investigation_focus,
                      num_sites, search_news, search_leaked_data,
                      temperature, velocidade, gpu_layers, n_batch):
-    # Atualiza configuração do modelo se parâmetros fornecidos
     if gpu_layers != "" and n_batch != "":
         try:
             with model_lock:
-                # recarrega o modelo com parâmetros customizados
                 load_model(int(gpu_layers), int(n_batch))
         except Exception as e:
             yield f"Erro ao atualizar GPU/CPU: {e}", ""
             return
 
     custom_temp = float(temperature) if temperature != "" else None
-    fast_mode  = True if velocidade == "Rápida" else False
+    fast_mode  = (velocidade == "Rápida")
 
     if mode == "Investigação":
         yield "⏳ Iniciando investigação...", ""
@@ -249,7 +246,6 @@ def gradio_interface(query, mode, language, style, investigation_focus,
             lang=language,
             fast_mode=fast_mode
         )
-        # inclui também links estáticos
         links_sites = build_site_links(query)
         yield report, links_sites + links_table
     elif mode == "Chat":
@@ -291,10 +287,32 @@ def build_gradio_interface():
         )
     return demo
 
-# ==================== LAUNCH ====================
+# ==================== LAUNCH MÚLTIPLO ====================
 if __name__ == '__main__':
-    # inicia Gradio em thread
+    # Inicia Gradio em thread, tentando porta de env ou automática
     demo = build_gradio_interface()
-    threading.Thread(target=lambda: demo.launch(server_name="0.0.0.0", server_port=7860), daemon=True).start()
-    # inicia Flask
+
+    def start_gradio():
+        port = int(os.environ.get("GRADIO_SERVER_PORT", 0))
+        try:
+            demo.launch(
+                server_name="0.0.0.0",
+                server_port=port,
+                share=False,
+                inline=False,
+                prevent_thread_lock=True
+            )
+        except OSError as e:
+            logger.warning(f"Não conseguiu usar a porta {port}: {e}. Tentando porta automática...")
+            demo.launch(
+                server_name="0.0.0.0",
+                server_port=0,
+                share=False,
+                inline=False,
+                prevent_thread_lock=True
+            )
+
+    threading.Thread(target=start_gradio, daemon=True).start()
+
+    # Inicia Flask
     app.run(host='0.0.0.0', port=5000, debug=True)
