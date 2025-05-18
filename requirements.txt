@@ -1,4 +1,14 @@
+flask
+nltk
+langdetect
+emoji
+llama-cpp-python
+huggingface-hub
+duckduckgo-search
+Pillow
+prometheus-client
+psutil
+scikit-learn
+gradio
 requests
-rich
-pyfiglet
-stem
+pyshark
