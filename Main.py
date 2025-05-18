@@ -13,23 +13,26 @@ import os
 import time
 import re
 import logging
-import requests
 import io
-import psutil
+import tempfile
 import threading
 import concurrent.futures
-import importlib.util
-import numpy as np
+import socket
+
+import nltk
 from flask import Flask, request, jsonify, render_template, Response
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from duckduckgo_search import DDGS
+from huggingface_hub import hf_hub_download
+from llama_cpp import Llama
 from nltk.sentiment import SentimentIntensityAnalyzer
 from langdetect import detect
-from llama_cpp import Llama
-from huggingface_hub import hf_hub_download
-from duckduckgo_search import DDGS
 from PIL import Image, ExifTags
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-import nltk
-import socket
+import psutil
+import requests
+import numpy as np
+from sklearn.ensemble import IsolationForest
 import gradio as gr
 
 # opcional: import pyshark se instalado
@@ -129,13 +132,11 @@ def after_request(response):
 
 @app.route('/')
 def index():
-    # agora busca em templates/index.html
-    return render_template('index.html')
+    return render_template('index.html')  # coloque seu template em templates/index.html
 
 @app.route('/metrics')
 def metrics():
-    data = generate_latest()
-    return Response(data, mimetype=CONTENT_TYPE_LATEST)
+    return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
 
 @app.route('/ask', methods=['POST'])
 def ask():
@@ -143,87 +144,157 @@ def ask():
     user_input = request.form.get('user_input', '').strip()
 
     if mode == "Investigação":
-        # 1) Autocorreção e pré-processamento (omitido aqui)
         query = user_input
 
-        # 2) Gera links dos sites estáticos
+        # gera links de sites estáticos
         links_sites = build_site_links(query)
 
-        # 3) Pesquisa web básica
+        # pesquisa web básica
         sites_meta = int(request.form.get('sites_meta', 5))
         results_web = perform_search(query, 'web', sites_meta)
         _, links_web, _ = format_search_results(results_web, "Resultados Web")
 
-        # 4) Geração de relatório via modelo
+        # geração de relatório
         report, _ = process_investigation(
             target=query,
             sites_meta=sites_meta,
-            investigation_focus=request.form.get('investigation_focus',''),
-            search_news=request.form.get('search_news','false')=='true',
-            search_leaked_data=request.form.get('search_leaked_data','false')=='true',
+            investigation_focus=request.form.get('investigation_focus', ''),
+            search_news=request.form.get('search_news', 'false') == 'true',
+            search_leaked_data=request.form.get('search_leaked_data', 'false') == 'true',
             custom_temperature=None,
             lang='Português',
             fast_mode=False
         )
 
-        # 5) Combina tudo e retorna
         final_links = links_sites + links_web
         return jsonify({'response': report, 'links': final_links})
 
-    # modos Chat e Metadados seguem seu fluxo normal…
+    # modos Chat e Metadados podem ser implementados aqui...
     return jsonify({'response': 'Modo não suportado.'})
 
 # ==================== FUNÇÕES AUXILIARES ====================
 def perform_search(query: str, search_type: str, max_results: int) -> list:
-    with DDGS() as ddgs:
-        if search_type == 'web':
-            return list(ddgs.text(keywords=query, max_results=max_results))
-        elif search_type == 'news':
-            return list(ddgs.news(keywords=query, max_results=max_results))
-        elif search_type == 'leaked':
-            return list(ddgs.text(keywords=f"{query} leaked", max_results=max_results))
+    try:
+        with DDGS() as ddgs:
+            if search_type == 'web':
+                return list(ddgs.text(keywords=query, max_results=max_results))
+            elif search_type == 'news':
+                return list(ddgs.news(keywords=query, max_results=max_results))
+            elif search_type == 'leaked':
+                return list(ddgs.text(keywords=f"{query} leaked", max_results=max_results))
+    except Exception as e:
+        logger.error(f"Erro na busca {search_type}: {e}")
     return []
 
 def format_search_results(results: list, title: str) -> tuple[str, str, str]:
     links_table = f"<h3>{title}</h3><table border='1' style='width:100%; border-collapse: collapse;'>"
     links_table += "<thead><tr><th>#</th><th>Título</th><th>Link</th></tr></thead><tbody>"
     for i, r in enumerate(results, 1):
-        href = r.get('href','')
-        title = r.get('title','')
-        links_table += f"<tr><td>{i}</td><td>{title}</td><td><a href='{href}' target='_blank'>{href}</a></td></tr>"
+        href = r.get('href', '')
+        txt  = r.get('title', '')
+        links_table += f"<tr><td>{i}</td><td>{txt}</td><td><a href='{href}' target='_blank'>{href}</a></td></tr>"
     links_table += "</tbody></table>"
     return "", links_table, ""
 
 def process_investigation(target: str, sites_meta: int, investigation_focus: str,
                           search_news: bool, search_leaked_data: bool,
                           custom_temperature, lang, fast_mode) -> tuple[str, str]:
-    """
-    Aqui entra todo o seu fluxo de autocorreção, buscas paralelas (web/news/leaked),
-    análise forense (regex), montagem do prompt e chamada ao modelo Llama.
-    Para simplificar, retorna um relatório dummy:
-    """
+    # Insira aqui seu fluxo completo: autocorrect_text, buscas paralelas,
+    # advanced_forensic_analysis, montagem de prompt e chamada ao modelo Llama.
+    # Para demo, retorno dummy:
     report = f"Relatório detalhado para '{target}' com foco em '{investigation_focus}'."
     return report, ""
 
-# ==================== MODELO LLM ====================
+# ==================== CARREGAMENTO DO MODELO ====================
 model_lock = threading.Lock()
 
 def load_model(custom_gpu_layers=None, custom_n_batch=None) -> Llama:
     model_path = os.path.join(DEFAULT_LOCAL_MODEL_DIR, DEFAULT_MODEL_FILE)
     if not os.path.exists(model_path):
-        hf_hub_download(repo_id=DEFAULT_MODEL_NAME, filename=DEFAULT_MODEL_FILE, local_dir=DEFAULT_LOCAL_MODEL_DIR, resume_download=True)
-    # detecção de GPU e configuração de n_gpu_layers, n_batch...
-    # (mesmo código que você já tem)
-    return Llama(model_path=model_path, n_ctx=4096, n_threads=psutil.cpu_count(), n_gpu_layers=-1, n_batch=1024)
+        hf_hub_download(repo_id=DEFAULT_MODEL_NAME, filename=DEFAULT_MODEL_FILE,
+                        local_dir=DEFAULT_LOCAL_MODEL_DIR, resume_download=True)
+    # Detectar GPU e definir n_gpu_layers, n_batch conforme ambiente
+    return Llama(model_path=model_path, n_ctx=4096,
+                 n_threads=psutil.cpu_count(logical=True),
+                 n_gpu_layers=-1, n_batch=1024)
 
 model = load_model()
 
-# ==================== GRADIO (opcional) ====================
-def gradio_interface(...):
-    # sua função de interface Gradio, sem alterações
-    ...
+# ==================== INTERFACE GRADIO ====================
+def gradio_interface(query, mode, language, style, investigation_focus,
+                     num_sites, search_news, search_leaked_data,
+                     temperature, velocidade, gpu_layers, n_batch):
+    # Atualiza configuração do modelo se parâmetros fornecidos
+    if gpu_layers != "" and n_batch != "":
+        try:
+            with model_lock:
+                # recarrega o modelo com parâmetros customizados
+                load_model(int(gpu_layers), int(n_batch))
+        except Exception as e:
+            yield f"Erro ao atualizar GPU/CPU: {e}", ""
+            return
 
-# ==================== EXECUÇÃO ====================
+    custom_temp = float(temperature) if temperature != "" else None
+    fast_mode  = True if velocidade == "Rápida" else False
+
+    if mode == "Investigação":
+        yield "⏳ Iniciando investigação...", ""
+        report, links_table = process_investigation(
+            target=query,
+            sites_meta=int(num_sites),
+            investigation_focus=investigation_focus,
+            search_news=search_news,
+            search_leaked_data=search_leaked_data,
+            custom_temperature=custom_temp,
+            lang=language,
+            fast_mode=fast_mode
+        )
+        # inclui também links estáticos
+        links_sites = build_site_links(query)
+        yield report, links_sites + links_table
+    elif mode == "Chat":
+        result = generate_response(query, language, style, custom_temp, fast_mode)
+        yield result, ""
+    elif mode == "Metadados":
+        meta = analyze_image_metadata(query)
+        formatted = "<br>".join(f"{k}: {v}" for k, v in meta.items())
+        yield formatted, ""
+    else:
+        yield "Modo não suportado.", ""
+
+def build_gradio_interface():
+    with gr.Blocks(title="IA - Chat & Investigação") as demo:
+        with gr.Row():
+            with gr.Column():
+                query_input          = gr.Textbox(label="Pergunta/Alvo", lines=2)
+                mode_input           = gr.Radio(["Chat","Investigação","Metadados"], label="Modo")
+                language_input       = gr.Radio(list(LANGUAGE_MAP.keys()), label="Idioma")
+                style_input          = gr.Radio(["Técnico","Livre"], label="Estilo")
+                investigation_focus  = gr.Textbox(label="Foco (opcional)")
+                num_sites            = gr.Number(label="Número de Sites", value=5, precision=0)
+                search_news_input    = gr.Checkbox(label="Pesquisar Notícias")
+                search_leaked_input  = gr.Checkbox(label="Pesquisar Dados Vazados")
+                temperature_input    = gr.Slider(0.0,1.0,0.1,value=0.7,label="Temperatura")
+                velocidade_input     = gr.Radio(["Rápida","Detalhada"], label="Velocidade")
+                gpu_layers_input     = gr.Textbox(label="Camadas GPU", placeholder="branco=padrão")
+                n_batch_input        = gr.Textbox(label="Tamanho do Lote", placeholder="branco=padrão")
+                submit_btn           = gr.Button("Enviar")
+            with gr.Column():
+                report_output = gr.HTML(label="Relatório")
+                links_output  = gr.HTML(label="Links")
+        submit_btn.click(
+            fn=gradio_interface,
+            inputs=[query_input,mode_input,language_input,style_input,
+                    investigation_focus,num_sites,search_news_input,search_leaked_input,
+                    temperature_input,velocidade_input,gpu_layers_input,n_batch_input],
+            outputs=[report_output,links_output]
+        )
+    return demo
+
+# ==================== LAUNCH ====================
 if __name__ == '__main__':
-    # iniciar Gradio em thread, se desejar...
+    # inicia Gradio em thread
+    demo = build_gradio_interface()
+    threading.Thread(target=lambda: demo.launch(server_name="0.0.0.0", server_port=7860), daemon=True).start()
+    # inicia Flask
     app.run(host='0.0.0.0', port=5000, debug=True)
